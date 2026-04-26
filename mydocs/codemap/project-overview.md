@@ -1,6 +1,6 @@
 # Sub-Store Workers 项目总图
 
-> 生成时间: 2026-04-23 15:11
+> 生成时间: 2026-04-23 15:11（最近更新: 2026-04-25）
 > 项目: sub-store-workers
 > 类型: project-level codemap
 
@@ -30,25 +30,32 @@
 
 ### 3.1 平台适配层（`src/`，本项目自有）
 
-| 文件 | 行数 | 职责 |
-|---|---|---|
-| `src/index.js` | 294 | **Workers 入口**：CORS 预检、路径前缀鉴权、KV 初始化、路由分发、Cron 定时同步 |
-| `src/vendor/express.js` | 326 | **Express 适配**：将 Workers fetch handler 适配为类 Express 的 req/res 路由 |
-| `src/vendor/open-api.js` | 328 | **OpenAPI 适配**：KV 替代 fs 存储、fetch 替代 undici、日志/通知/推送 |
-| `src/core/app.js` | 5 | 单例 `$` 导出（`new OpenAPI('sub-store')`） |
-| `src/utils/env.js` | 42 | 环境检测变量，`backend = 'Workers'` |
-| `src/restful/miscs.js` | 298 | 工具 API：`/api/utils/env`、Gist 备份/还原、存储管理、刷新 |
-| `src/restful/token.js` | 321 | Token 签发/删除（Workers 版，替换上游 JWT 方案为 nanoid） |
+| 文件 | 职责 |
+|---|---|
+| `src/index.js` | **Workers 入口**：CORS 预检、KV 绑定校验、路径前缀鉴权（含未配置警告头）、KV 初始化、路由分发、Cron 定时同步 |
+| `src/vendor/express.js` | **Express 适配**：将 Workers fetch handler 适配为类 Express 的 req/res 路由 |
+| `src/vendor/open-api.js` | **OpenAPI 适配**：KV 替代 fs 存储、fetch 替代 undici、日志/通知/推送 |
+| `src/core/app.js` | 单例 `$` 导出（`new OpenAPI('sub-store')`） |
+| `src/utils/env.js` | 环境检测变量，`backend = 'Workers'`，`isWorker = true` |
+| `src/restful/miscs.js` | 工具 API：`/api/utils/env`（暴露 `SUB_STORE_*` 给前端）、`/api/utils/worker-status`（KV/鉴权/能力诊断）、Gist 备份/还原、存储管理、刷新 |
+| `src/restful/token.js` | Token 签发/删除（Workers 版，替换上游 JWT 方案为 nanoid） |
 
 ### 3.2 构建层
 
-| 文件 | 行数 | 职责 |
-|---|---|---|
-| `esbuild.js` | 284 | **构建脚本**：4 个 esbuild 插件桥接 Workers 与上游源码 |
-| `wrangler.toml` | 18 | Workers 部署配置：KV 绑定、Cron、环境变量 |
-| `package.json` | 31 | 依赖与脚本 |
+| 文件 | 职责 |
+|---|---|
+| `esbuild.js` | **构建脚本**：4 个 esbuild 插件桥接 Workers 与上游源码；同时把上游 `createDynamicFunction` 替换为明确不支持错误，避免运行时 `new Function` 失败 |
+| `wrangler.toml` | Workers 部署配置：KV 绑定、Cron、环境变量（路径密码推荐改用 Worker Secret） |
+| `package.json` | 依赖与脚本（`deploy`、`deploy:pages`、`rotate-secret`、`rotate-secret:sh`） |
 
-### 3.3 上游源码（构建时引入，`../Sub-Store/backend/src/`）
+### 3.3 运维脚本（`scripts/`）
+
+| 文件 | 职责 |
+|---|---|
+| `scripts/rotate-secret.ps1` | Windows PowerShell：生成随机 URL-safe 密码，通过管道写入 Cloudflare Worker Secret `SUB_STORE_FRONTEND_BACKEND_PATH`，并复制到剪贴板 |
+| `scripts/rotate-secret.sh` | Linux/macOS Bash：同上，自动选择 `pbcopy`/`wl-copy`/`xclip`/`xsel` |
+
+### 3.4 上游源码（构建时引入，`../Sub-Store/backend/src/`）
 
 通过 esbuild `@/` 别名解析：**Workers `src/` 优先 → 回退到上游 `src/`**。
 
@@ -69,8 +76,12 @@ Browser → fetch()
   │
   ├─ OPTIONS → 返回 CORS headers
   │
+  ├─ KV 绑定校验（缺失 SUB_STORE_DATA → 500 明确错误）
+  │
   ├─ 路径前缀鉴权（可选）
-  │   ├─ /api/* 无前缀 → 401
+  │   ├─ 未配置 SUB_STORE_FRONTEND_BACKEND_PATH 且访问 /api/*
+  │   │     → 控制台警告 + 响应头 X-Sub-Store-Security-Warning
+  │   ├─ 已配置时：/api/* 无前缀 → 401
   │   ├─ /backendPath 精确 → 302 重定向
   │   └─ /backendPath/... → 剥离前缀
   │
@@ -116,9 +127,12 @@ esbuild.js
 
 ## 6. 安全机制
 
-- **路径前缀鉴权**：`SUB_STORE_FRONTEND_BACKEND_PATH` 环境变量
+- **路径前缀鉴权**：`SUB_STORE_FRONTEND_BACKEND_PATH`，**推荐用 Cloudflare Worker Secret 存放**（`wrangler secret put` 或 `npm run rotate-secret`），不要写在 `wrangler.toml [vars]` 里——后者明文存仓库且会被 `wrangler deploy` 覆盖同名 Secret。
+- **未配置鉴权告警**：未配置时管理 API 访问会输出控制台警告并附加响应头 `X-Sub-Store-Security-Warning`，提醒部署者尽快设置密码。
 - **公开路径白名单**：`/api/download`、`/api/preview`、`/api/sub/flow` 不受鉴权限制
 - **CORS**：全局 `Access-Control-Allow-Origin: *`
+- **Script Operator 禁用**：构建期改写 `createDynamicFunction`，禁止 `eval`/`new Function` 形式的脚本操作，避免 Workers 平台拒绝执行。
+- **状态自检**：`/api/utils/worker-status` 输出 KV 绑定、鉴权、能力降级（脚本/socks/本地文件系统/cron）等运行时信息，方便部署后快速验证。
 
 ## 7. 外部依赖
 
@@ -141,3 +155,6 @@ esbuild.js
 3. **上游兼容性**：上游 Sub-Store 更新可能引入 Node-only API，需要构建时通过存根或适配处理
 4. **CPU 时限**：Workers 免费版 10ms CPU / 请求，复杂订阅处理可能超时
 5. **全局状态污染**：`globalThis.__workerEnv` 在并发请求间共享，理论上存在竞态
+6. **Pages 与 Workers 配置不互通**：`wrangler.toml` 的 `[vars]`/`[[kv_namespaces]]` 不影响 Pages 项目，需要在 Cloudflare Dashboard 单独绑定 KV 与设置 `SUB_STORE_FRONTEND_BACKEND_PATH`（建议设为 Pages Secret）。
+7. **`[vars]` 与 Worker Secret 同名冲突**：若同时存在，`wrangler deploy` 会用 `[vars]` 明文覆盖 Secret，破坏 CI Secret 管理流程；只用其中一种。
+8. **路径密码不可恢复**：Worker Secret 在 Dashboard 看不到原文，遗忘只能通过 `npm run rotate-secret` 重置。

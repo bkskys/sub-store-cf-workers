@@ -31,7 +31,17 @@ Sub-Store 后端的 Cloudflare Workers 移植版
 - **完整功能**：复用原始后端全部业务逻辑（订阅管理、格式转换、下载、预览等）
 - **预编译解析器**：peggy 文法在构建时编译，避免运行时 eval()
 
-## 架构
+## 目录
+
+- [部署](#部署)（核心流程，建议从这里开始）
+- [进阶配置 / 平台说明](#进阶配置--平台说明)（推送、环境变量、本地开发等，已折叠）
+- [FAQ](#faq)
+- [同步更新](#同步更新)
+- [Surge 面板脚本](#surge-面板脚本)
+- [致谢](#致谢) ｜ [许可证](#许可证)
+
+<details>
+<summary><b>架构说明</b>（如果你只想部署可跳过）</summary>
 
 ```
 sub-store-workers/src/        ← Workers 适配层（6 个文件）
@@ -50,7 +60,18 @@ esbuild.js                    ← 构建脚本，通过插件桥接两者
 | `restful/token.js` | 允许 Workers 签发 token |
 | `index.js` | Workers 入口 |
 
+更详细的项目总图见 [`mydocs/codemap/project-overview.md`](mydocs/codemap/project-overview.md)。
+
+</details>
+
 ## 部署
+
+> 部署总览：**1.准备 → 2.上传 Workers/Pages → 3.设密码（必做）→ 4.连接前端**
+>
+> 为什么两个都要部？`*.workers.dev` 在国内被 GFW 封锁，`*.pages.dev` 走 Cloudflare CDN 通常可直连。
+>
+> - **有自定义域名**：只用 Workers 即可
+> - **无自定义域名**：Pages 对外提供 API，Workers 在后台跑 Cron。
 
 ### 1. 克隆仓库
 
@@ -96,10 +117,7 @@ id = "你的KV命名空间ID"
 | **Workers** | `*.workers.dev` 或自定义域名 | API + Cron 定时同步 |
 | **Pages** | `*.pages.dev` | API（国内可直连） |
 
-- 有自定义域名：绑到 Workers，只用 Workers 即可
-- 无自定义域名：Pages 对外提供 API，Workers 跑 Cron（服务端执行，不受墙影响）
-
-> ⚠️ **执行下方部署命令前，请先确认已完成「1. 克隆仓库」「2. 登录 Cloudflare」「3. 创建 KV 命名空间」三步**，并完整阅读下文「6. 连接前端」「7. API 鉴权」两节。**部署完未设密码前 Worker 是公开的，任何人都能管理你的数据。**
+> ⚠️ **执行下方部署命令前，请先确认已完成「1. 克隆仓库」「2. 登录 Cloudflare」「3. 创建 KV 命名空间」三步**，并完整阅读下文「5. 连接前端」「6. API 鉴权」两节。**部署完未设密码前 Worker 是公开的，任何人都能管理你的数据。**
 
 ```bash
 # Workers 部署（含 Cron Triggers）
@@ -119,54 +137,59 @@ npm run deploy:pages
 > npm run rotate-secret:sh
 > ```
 >
-> 脚本会生成随机 URL-safe 密码，写入 Cloudflare Worker Secret，并复制到剪贴板。详细说明见下文“7. API 鉴权”。
+> 脚本会生成随机 URL-safe 密码，写入 Cloudflare Worker Secret，并复制到剪贴板。详细说明见下文“6. API 鉴权”。
 
-> Pages 部署需要在 Cloudflare Dashboard 中手动绑定 KV，步骤如下：
-
-**① 进入 Workers & Pages，点击 sub-store 项目**
-
-![进入项目](png/1.png)
-
-**② 进入 设置 → 绑定，点击 + 添加**
-
-![添加绑定](png/2.png)
-
-**③ 选择 KV 命名空间**
-
-![选择 KV](png/3.png)
-
-**④ 变量名填 `SUB_STORE_DATA`，选择对应 KV，保存**
-
-![保存绑定](png/4.png)
-
-> 保存后需要重新部署一次才能生效。
-
-### 5. 为什么需要 Pages？
-
-`workers.dev` 域名在国内被 GFW 封锁，无法直接访问。`pages.dev` 走 Cloudflare CDN 网络，与大量正常网站共用 IP 段，国内通常可直连。
-
-- **有自定义域名**：绑到 Workers 即可，不需要 Pages
-- **无自定义域名**：Pages 对外提供 API，Workers 在后台跑 Cron 定时同步（服务端执行，不受墙影响）
-
-> **自定义域名注意事项**：
-> - SSL/TLS 加密模式必须设为 **Full**（Cloudflare Dashboard → 域名 → SSL/TLS → 概述）
-> - Cloudflare 免费 SSL 证书只覆盖**一级子域名**（`*.example.com`），不支持多级子域名（如 `a.b.example.com`）
->   - 正确 `substore.example.com`
->   - 错误 `substore.sub.example.com`（会导致 `ERR_CONNECTION_CLOSED`）
+> Pages 部署完成后还需要在 Cloudflare Dashboard 中：
 >
-> 如果遇到 `ERR_CONNECTION_CLOSED`，请检查以上两点。
+> 1. 绑定 KV 命名空间 `SUB_STORE_DATA`
+> 2. 设置鉴权密码 Secret `SUB_STORE_FRONTEND_BACKEND_PATH`
+>
+> 详细图文步骤见下文 [6. API 鉴权 → 方式 A.2 Pages 端](#6-api-鉴权强烈建议--已在第-4-步完成可跳过)。配置完成后必须再跑一次 `npm run deploy:pages` 让绑定生效。
 
-### 6. 连接前端
+<details>
+<summary><b>自定义域名注意事项（如果你绑定了自有域名）</b></summary>
 
-打开 [Sub-Store 前端](https://sub-store.vercel.app)，后端地址填你的 Workers/Pages URL。
+- SSL/TLS 加密模式必须设为 **Full**（Cloudflare Dashboard → 域名 → SSL/TLS → 概述）
+- Cloudflare 免费 SSL 证书只覆盖**一级子域名**（`*.example.com`），不支持多级子域名（如 `a.b.example.com`）
+  - 正确 `substore.example.com`
+  - 错误 `substore.sub.example.com`（会导致 `ERR_CONNECTION_CLOSED`）
 
-### 7. API 鉴权（可选）
+</details>
 
-默认 API 无密码保护。配置路径前缀后，只有知道密码的人才能管理：
+### 5. 连接前端
 
-#### 方式 A：使用 Worker Secret（推荐）
+打开 [Sub-Store 前端](https://sub-store.vercel.app)，后端地址格式：
 
-把密码以加密 Secret 形式存放在 Cloudflare，仓库代码不暴露任何密码，且 `wrangler deploy` 不会覆盖 Secret。仓库提供了密钥轮换脚本：
+```text
+你的域名/你的密码
+```
+
+例如：
+
+```text
+https://sub-store-workers.your.workers.dev/aBc123XyZ
+https://sub-store.your.pages.dev/aBc123XyZ
+```
+
+> 注意：**末尾的 `/密码` 不能省略**，否则 `/api/...` 会全部 401。
+
+部署完后访问 `https://你的域名/你的密码/api/utils/worker-status`，应返回：
+
+```json
+{ "kv": { "bound": true }, "auth": { "backendPathConfigured": true } }
+```
+
+### 6. API 鉴权（强烈建议 / 已在第 4 步完成可跳过）
+
+> 默认 API 无密码保护。**不设密码任何人都能管理你的订阅**。第 4 步执行 `npm run rotate-secret` 已经设过的话，可以跳过本节。
+
+> 推荐使用 **Worker / Pages Secret**（加密存储）。**不要**写到 `wrangler.toml [vars]` 里——那里是明文，会随 commit 泄漏，并且 `wrangler deploy` 会用它覆盖同名 Secret，与下面的流程冲突。
+
+#### 方式 A（推荐）：使用 Cloudflare Secret
+
+##### A.1 Workers 端（项目自带脚本）
+
+仓库提供了密钥轮换脚本，一行命令完成生成 + 写入 + 复制到剪贴板：
 
 ```bash
 # Windows
@@ -193,80 +216,63 @@ npm run rotate-secret:sh
 > - macOS：`pbcopy </dev/null`
 > - Linux：`wl-copy --clear` 或 `xsel --clipboard --clear`
 
-也可以手动设置：
+也可以手动设置（提示输入时填带 `/` 开头的密码）：
 
 ```bash
 npx wrangler secret put SUB_STORE_FRONTEND_BACKEND_PATH
-# 提示输入时填 /你的密码（必须以 / 开头）
 ```
 
-#### 方式 B：使用 wrangler.toml 明文变量（不推荐）
+##### A.2 Pages 端（在 Dashboard 配置）
 
-在 `wrangler.toml` 中取消注释并设置：
+`wrangler.toml` 的 `[[kv_namespaces]]` 与 `[vars]` **只对 Workers 生效**。Pages 项目必须在 Cloudflare Dashboard 单独绑定 KV 与设置密码，否则 API 会因为缺少 KV 而 500，且任何人都可访问管理 API。
+
+**① 进入 Workers & Pages，点击 sub-store 项目**
+
+![进入项目](png/1.png)
+
+**② 进入 设置 → 绑定，点击 + 添加 KV 命名空间**
+
+![添加绑定](png/2.png)
+
+**③ 选择 KV 命名空间**
+
+![选择 KV](png/3.png)
+
+**④ 变量名填 `SUB_STORE_DATA`，选择对应 KV，保存**
+
+![保存绑定](png/4.png)
+
+**⑤ 进入 设置 → 变量和机密，点击 + 添加**
+
+![添加变量](png/5.png)
+
+**⑥ 变量名填 `SUB_STORE_FRONTEND_BACKEND_PATH`，值填 `/你的密码`（必须带 `/` 开头），类型选 Secret（加密），保存**
+
+![填写变量](png/6.png)
+
+> 保存后必须重新部署 `npm run deploy:pages` 才能生效。
+
+> Pages 不能跨项目共享 Worker Secret，建议把 Workers 与 Pages 的 `SUB_STORE_FRONTEND_BACKEND_PATH` 设为同一个值，方便前端切换。
+
+#### 方式 B（不推荐）：使用 `wrangler.toml [vars]` 明文变量
 
 ```toml
 [vars]
 SUB_STORE_FRONTEND_BACKEND_PATH = "/你的密码"
 ```
 
-> 缺点：明文写在仓库文件里，commit 容易泄漏；`wrangler deploy` 会覆盖同名 Secret，与方式 A 冲突。
+> 仅在临时调试时使用。明文写仓库文件容易随 commit 泄漏；同时 `wrangler deploy` 会用它覆盖 Secret，破坏方式 A 的 CI/Secret 流程。生产环境请使用方式 A。
 
-前端后端地址填：`https://xxx.pages.dev/你的密码`
-
-> **注意**：`wrangler.toml` 的 `[vars]` 仅对 Workers 生效。**Pages 需要在 Dashboard 手动添加环境变量**：
-
-**⑤ 进入 设置 → 变量和机密，点击 + 添加**
-
-![添加变量](png/5.png)
-
-**⑥ 变量名填 `SUB_STORE_FRONTEND_BACKEND_PATH`，值填 `/你的密码`（注意必须带 `/` 开头，如 `/woain`），保存**
-
-![填写变量](png/6.png)
-
-> 保存后重新部署 `npm run deploy:pages` 才能生效。
-
-> 分享链接（download/preview）不受影响，无需密码即可访问。
+> 分享链接（download/preview）不受鉴权影响，无需密码即可访问。
 
 > **分享按钮**：订阅列表里的“分享”按钮仅在通过密码前缀访问时显示（与上游 Docker/Node 部署的 `be_merge` 行为一致），未配置密码前缀的部署不会显示分享按钮。
 
-### 8. 推送通知（可选）
+---
 
-支持 Bark、Pushover 等 HTTP URL 推送方式。在 `wrangler.toml` 中配置：
+## 进阶配置 / 平台说明
 
-```toml
-[vars]
-SUB_STORE_PUSH_SERVICE = "https://api.day.app/你的BarkKey/[推送标题]/[推送内容]"
-```
-
-> **注意**：Pages 同样需要在 Dashboard 手动添加 `SUB_STORE_PUSH_SERVICE` 环境变量。
-
-> 不支持 shoutrrr（命令行工具）。
-
-### 环境变量
-
-| 变量 | 说明 | 必填 |
-|---|---|---|
-| `SUB_STORE_FRONTEND_BACKEND_PATH` | API 路径前缀密码，如 `/mySecret`。推荐用 Worker Secret 管理（见上文“方式 A”） | 否 |
-| `SUB_STORE_PUSH_SERVICE` | HTTP URL 推送地址 | 否 |
-
-### 状态检查接口
-
-部署完成后可访问：
-
-```text
-https://你的域名/你的密码/api/utils/worker-status
-```
-
-返回内容会显示：
-
-- `kv.bound`：是否已正确绑定 KV
-- `auth.backendPathConfigured`：是否已配置鉴权
-- `auth.managementApiPublic`：管理 API 是否处于公开状态
-- `capabilities`：当前部署支持/不支持的能力（脚本操作、Gist 备份、Cron 等）
-
-> **脚本操作（Script Operator）受限**：Cloudflare Workers 禁止通过 `eval` / `new Function` 执行任意 JavaScript，因此自定义脚本类操作不可用。本仓库构建时会把上游 `createDynamicFunction` 替换成明确错误，避免运行时踩坑。如需脚本能力，可考虑使用内置过滤/操作器、mihomo YAML patch、或在受信任的外部服务中执行 JS。
-
-## 本地开发
+<details>
+<summary><b>本地开发</b></summary>
 
 ```bash
 npm run dev
@@ -274,7 +280,52 @@ npm run dev
 
 访问 `http://127.0.0.1:3000`。
 
-## esbuild 插件
+</details>
+
+<details>
+<summary><b>推送通知（Bark / Pushover）</b></summary>
+
+支持 HTTP URL 推送方式。在 `wrangler.toml` 中配置：
+
+```toml
+[vars]
+SUB_STORE_PUSH_SERVICE = "https://api.day.app/你的BarkKey/[推送标题]/[推送内容]"
+```
+
+Pages 需要在 Dashboard 手动添加同名环境变量。不支持 shoutrrr（命令行工具）。
+
+</details>
+
+<details>
+<summary><b>环境变量一览</b></summary>
+
+| 变量 | 说明 | 必填 |
+|---|---|---|
+| `SUB_STORE_FRONTEND_BACKEND_PATH` | API 路径前缀密码，推荐用 Worker Secret 管理 | 否（生产环境必设） |
+| `SUB_STORE_PUSH_SERVICE` | HTTP URL 推送地址 | 否 |
+
+</details>
+
+<details>
+<summary><b>状态检查接口 / Script Operator 限制</b></summary>
+
+```text
+https://你的域名/你的密码/api/utils/worker-status
+```
+
+返回字段说明：
+
+- `kv.bound`：是否已正确绑定 KV
+- `auth.backendPathConfigured`：是否已配置鉴权
+- `auth.managementApiPublic`：管理 API 是否处于公开状态
+- `capabilities`：当前部署支持/不支持的能力（脚本操作、Gist 备份、Cron 等）
+
+**脚本操作（Script Operator）受限**：Cloudflare Workers 禁止 `eval` / `new Function`，本仓库在构建期将上游 `createDynamicFunction` 改为明确错误。替代方案：内置过滤/操作器、mihomo YAML patch、或在外部可信服务中执行脚本。
+
+</details>
+
+<details>
+<summary><b>esbuild 插件</b></summary>
 
 | 插件 | 作用 |
 |---|---|
@@ -283,7 +334,10 @@ npm run dev
 | `peggy 预编译` | 构建时编译 PEG 文法，消除运行时 eval |
 | `Node 模块存根` | 存根 fs/crypto 等不可用模块 |
 
-## Cron 定时同步
+</details>
+
+<details>
+<summary><b>Cron 定时同步</b></summary>
 
 Workers 版内置了 Cron Trigger，默认每天 **23:55（北京时间）** 自动同步 artifacts 到 Gist。
 
@@ -296,46 +350,10 @@ crons = ["55 15 * * *"]  # UTC 时间，+8 即北京时间
 
 > 前提：在前端 Settings 中配置好 GitHub 用户名和 Gist Token。
 
-## 不支持的功能（Node 专属，Workers 无法实现）
+</details>
 
-| 功能 | 原因 |
-|---|---|
-| 前端静态文件托管 | 需要 `express.static` + `fs`，无本地文件系统 |
-| 前端代理中间件 | 需要 `http-proxy-middleware`，Node 专属 |
-| MMDB IP 查询 | 需要读取本地 MMDB 文件（`@maxmind/geoip2-node`） |
-| MMDB 定时下载 | 需要 `fs.writeFile` 写入本地文件 |
-| DATA_URL 启动恢复 | 需要 Node `fs` 写文件 |
-| Gist 备份定时下载 | 从 Gist 下载恢复备份的 Cron（手动触发仍可用） |
-| `ip-flag-node.js` 脚本 | 依赖本地 MMDB，可用 `ip-flag.js`（HTTP API）替代 |
-| jsrsasign TLS 指纹 | 全局作用域限制 |
-| shoutrrr 推送 | 需要 `child_process` 执行命令行工具 |
-| 代理请求 | Workers 出站走 Cloudflare 网络，不支持自定义 HTTP/SOCKS5 代理 |
-
-## Workers 平台限制
-
-| 限制 | 说明 |
-|---|---|
-| **请求超时 30 秒** | 单次请求墙钟时间上限 30 秒，订阅源响应慢会超时失败 |
-| **出站 IP 为境外** | 从 Cloudflare 节点拉取订阅，部分限制国内 IP 的订阅源无法拉取 |
-| **推送通知** | 仅支持 HTTP URL 方式（Bark、Pushover 等），不支持 shoutrrr |
-
-> 如果你的订阅源限制国内访问或响应较慢，建议使用 VPS 自建 Node.js 版本。
-
-## FAQ
-
-**Q: 前端提示 `找不到 Sub-Store Artifacts Repository`**
-A: 正常现象，你还没创建同步配置。创建第一个同步后会自动生成。
-
-**Q: 拉取订阅超时**
-A: Workers 单次请求上限 30 秒。如果订阅源响应慢，会超时失败。可尝试换一个订阅链接。
-
-**Q: 某些订阅源返回空或报错**
-A: Workers 出站 IP 为境外 Cloudflare 节点，部分限制国内 IP 的订阅源无法拉取。
-
-**Q: 如何更新到最新版？**
-A: 见下方[同步原始仓库更新](#同步原始仓库更新)。
-
-## KV 读写优化
+<details>
+<summary><b>KV 读写优化</b></summary>
 
 Cloudflare KV 免费额度：读 10 万次/天，**写 1000 次/天**。
 
@@ -353,11 +371,68 @@ Cloudflare KV 免费额度：读 10 万次/天，**写 1000 次/天**。
 
 个人使用完全不用担心超额。
 
+</details>
+
+<details>
+<summary><b>Workers 平台限制 / 不支持的功能</b></summary>
+
+### 平台限制
+
+| 限制 | 说明 |
+|---|---|
+| **请求超时 30 秒** | 单次请求墙钟时间上限 30 秒，订阅源响应慢会超时失败 |
+| **出站 IP 为境外** | 从 Cloudflare 节点拉取订阅，部分限制国内 IP 的订阅源无法拉取 |
+| **推送通知** | 仅支持 HTTP URL 方式（Bark、Pushover 等），不支持 shoutrrr |
+
+> 如果你的订阅源限制国内访问或响应较慢，建议使用 VPS 自建 Node.js 版本。
+
+### Node 专属功能（Workers 无法实现）
+
+| 功能 | 原因 |
+|---|---|
+| 前端静态文件托管 | 需要 `express.static` + `fs`，无本地文件系统 |
+| 前端代理中间件 | 需要 `http-proxy-middleware`，Node 专属 |
+| MMDB IP 查询 | 需要读取本地 MMDB 文件（`@maxmind/geoip2-node`） |
+| MMDB 定时下载 | 需要 `fs.writeFile` 写入本地文件 |
+| DATA_URL 启动恢复 | 需要 Node `fs` 写文件 |
+| Gist 备份定时下载 | 从 Gist 下载恢复备份的 Cron（手动触发仍可用） |
+| `ip-flag-node.js` 脚本 | 依赖本地 MMDB，可用 `ip-flag.js`（HTTP API）替代 |
+| jsrsasign TLS 指纹 | 全局作用域限制 |
+| shoutrrr 推送 | 需要 `child_process` 执行命令行工具 |
+| 代理请求 | Workers 出站走 Cloudflare 网络，不支持自定义 HTTP/SOCKS5 代理 |
+
+</details>
+
+---
+
+## FAQ
+
+<details>
+<summary><b>常见问题</b></summary>
+
+**Q: 前端提示 `找不到 Sub-Store Artifacts Repository`**
+A: 正常现象，你还没创建同步配置。创建第一个同步后会自动生成。
+
+**Q: 拉取订阅超时**
+A: Workers 单次请求上限 30 秒。如果订阅源响应慢，会超时失败。可尝试换一个订阅链接。
+
+**Q: 某些订阅源返回空或报错**
+A: Workers 出站 IP 为境外 Cloudflare 节点，部分限制国内 IP 的订阅源无法拉取。
+
+**Q: 如何更新到最新版？**
+A: 见下方「同步更新」章节。
+
+**Q: 忘了设置的密码怎么办？**
+A: Worker Secret 在 Dashboard 看不到原文，无法找回。直接 `npm run rotate-secret` 重置即可。
+
+</details>
+
+---
+
 ## 同步更新
 
-### 更新 sub-store-workers（本项目）
-
-当本项目有新版本时，拉取最新代码并重新部署：
+<details>
+<summary><b>更新 sub-store-workers（本项目）</b></summary>
 
 ```bash
 cd sub-store-workers
@@ -365,7 +440,12 @@ git pull
 npm run deploy
 ```
 
-### 更新 Sub-Store 原始仓库
+> Worker Secret 不会被 deploy 覆盖，密码保持不变。
+
+</details>
+
+<details>
+<summary><b>更新 Sub-Store 原始仓库</b></summary>
 
 本项目不会自动同步 Sub-Store 原始仓库的更新。当原始仓库有新版本时，手动执行：
 
@@ -379,7 +459,14 @@ npm run deploy
 
 esbuild 构建时会从 `Sub-Store/backend/src/` 读取最新源码，重新 build 即可包含新功能。
 
+</details>
+
+---
+
 ## Surge 面板脚本
+
+<details>
+<summary><b>展开查看</b></summary>
 
 `surge/` 目录下提供了一个 Surge Panel 脚本，可在 Surge 面板中实时监控 Cloudflare Workers 用量。
 
@@ -417,6 +504,10 @@ https://raw.githubusercontent.com/Yu9191/sub-store-workers/main/surge/SubStorePa
 | Account Analytics | Read |
 
 建议过期时间选「无过期时间」。
+
+</details>
+
+---
 
 ## 致谢
 
