@@ -3,3 +3,4 @@ dist/
 pages-dist/_worker.js
 .wrangler/
 .dev.vars
+wrangler.toml
