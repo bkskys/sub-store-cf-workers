@@ -21,6 +21,8 @@ Sub-Store 后端的 Cloudflare Workers 移植版
 </p>
 
 > **注意**：一键部署按钮**仅供参考**，由于项目需要本地构建（esbuild + Sub-Store 源码），实际无法直接通过此按钮完成部署。请参照下方[手动部署步骤](#部署)。
+>
+> **自动部署**：本仓库已内置 GitHub Actions 工作流，每天自动检测上游 Sub-Store 更新并部署到 Cloudflare。只需配置 Secrets 即可开启，无需本地操作。详见 [GitHub Actions 自动同步上游](#同步更新)。
 
 ## 简介
 
@@ -447,7 +449,7 @@ npm run deploy
 <details>
 <summary><b>更新 Sub-Store 原始仓库</b></summary>
 
-本项目不会自动同步 Sub-Store 原始仓库的更新。当原始仓库有新版本时，手动执行：
+当原始仓库有新版本时，手动执行：
 
 ```bash
 cd Sub-Store
@@ -458,6 +460,78 @@ npm run deploy
 ```
 
 esbuild 构建时会从 `Sub-Store/backend/src/` 读取最新源码，重新 build 即可包含新功能。
+
+</details>
+
+<details>
+<summary><b>GitHub Actions 自动同步上游（推荐）</b></summary>
+
+仓库内置了 `.github/workflows/sync-upstream.yml` 工作流，每天自动检测 Sub-Store 上游更新并部署。
+
+#### 工作流程
+
+```
+每天 00:00（北京时间）自动触发
+  ↓
+拉取上游最新 commit，对比已部署版本
+  ↓ 有更新
+安装依赖 → 运行上游测试套件
+  ↓ 测试通过
+构建 → 部署 Workers → 部署 Pages → 健康检查
+  ↓ 全部成功
+记录已部署版本 + Bark 通知
+
+任何环节失败 → Bark 通知"同步失败"，线上版本不受影响
+```
+
+#### 配置步骤
+
+**1. 创建 Cloudflare API Token**
+
+打开 [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → **Custom Token**，添加以下权限：
+
+| 资源 | 权限 | 级别 |
+|---|---|---|
+| Account → Workers 脚本 | 编辑 | 你的账号 |
+| Account → Cloudflare Pages | 编辑 | 你的账号 |
+| Account → Workers KV 存储 | 编辑 | 你的账号 |
+| User → 用户详细信息 | 读取 | -- |
+
+Account Resources 选择 **Include → 你的账号**。
+
+**2. 添加 GitHub Repository Secrets**
+
+打开仓库 Settings → Secrets and variables → Actions → New repository secret，依次添加：
+
+| Secret 名称 | 值 | 说明 |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | 上一步创建的 Token | Cloudflare 部署认证 |
+| `CLOUDFLARE_ACCOUNT_ID` | 你的 Account ID | Cloudflare Dashboard 首页右侧可见 |
+| `KV_NAMESPACE_ID` | KV 命名空间 ID | 创建 KV 时返回的 id |
+| `PAGES_PROJECT_NAME` | Pages 项目名 | 例如 `sub-store` |
+| `WORKERS_SUBDOMAIN` | Workers 子域名 | 例如 `sub-store2`（即 `*.sub-store2.workers.dev` 中的部分）|
+| `BARK_KEY` | Bark 推送 Key | 可选，用于成功/失败通知 |
+
+**3. 手动触发验证**
+
+打开仓库 Actions 页面 → Sync Upstream Sub-Store → Run workflow → 勾选 `force = true` → Run。
+
+全部绿色即配置成功，之后每天自动运行。
+
+#### 风险与失败场景
+
+| 场景 | 后果 | 处理方式 |
+|---|---|---|
+| **上游测试未通过** | 不会部署，线上不受影响 | 等上游修复后下次自动重试 |
+| **构建失败**（上游引入了 Workers 不兼容的 API） | 不会部署 | 需要手动适配 `src/` 覆盖层，提 issue |
+| **Cloudflare API 超时/限流** | 部署中断 | 下次自动重试 |
+| **API Token 过期或权限不足** | 部署失败 | 重新创建 Token 并更新 GitHub Secret |
+| **上游大版本重构**（目录结构变化） | 构建失败 | 需要手动更新 esbuild 配置 |
+| **健康检查失败** | Workers/Pages 已部署但版本标记不更新 | 手动检查线上是否正常 |
+
+> **安全提示**：Cloudflare API Token 和 Account ID 请通过 GitHub Secrets 管理，**不要**写入任何文件或提交到仓库。
+
+> **手动触发**：任何时候都可以在 Actions 页面手动 Run workflow，`force = true` 会跳过版本检查强制部署。
 
 </details>
 
